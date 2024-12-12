@@ -2,8 +2,9 @@ use futures::StreamExt;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, MaybeTlsStream};
 use serde_json::Value;
 use clap::{Command, Arg};
-// use std::time::Duration;
 use tokio::net::TcpStream;
+use std::fs::File;
+use std::io::{self, BufRead, Write, BufReader};
 
 #[tokio::main]
 async fn main() {
@@ -20,24 +21,28 @@ async fn main() {
 
     // Print the parsed arguments
     println!("Mode: {}", mode);
-    println!("Will listen for {} seconds.", times);
+
 
     // Start the WebSocket listener in the "cache" mode
-    if mode == "cache" {
-        match run_websocket(times).await {
-            Ok(_) => println!("Finished listening after {} seconds.", times),
-            Err(e) => eprintln!("Error occurred while listening: {}", e),
-        }
-    } else {
-        println!("Unknown mode: {}", mode);
+    match mode.as_str() {
+        "cache" => {
+            println!("Will listen for {} seconds.", times);
+            match run_websocket(times).await {
+                Ok(_) => println!("Finished listening after {} seconds.", times),
+                Err(e) => eprintln!("Error occurred while listening: {}", e),
+            }
+        },
+        "read" => read_mode().expect("Failed to read price data"),
+        _ => eprintln!("Invalid mode: {mode}. Use --mode=cache or --mode=read.")
     }
+
 }
 
 /// Parse the command-line arguments
 fn parse_arguments() -> clap::ArgMatches {
     Command::new("WebSocket Listener")
         .version("1.0")
-        .author("Pruthvi Thakor, pruthvi.thakor@codezeros")
+        .author("Pruthvi Thakor")
         .about("Listens to the WebSocket for BTC/USDT prices")
         .arg(
             Arg::new("mode")
@@ -78,12 +83,8 @@ async fn run_websocket(times: u64) -> Result<(), Box<dyn std::error::Error>> {
     let mut price_data: Vec<f64> = Vec::new();
     while start_time.elapsed().as_secs() < times {
         if let Some(Ok(Message::Text(text))) = ws_stream.next().await {
-            // Process the incoming message
-            if let Err(e) = process_message(&text) {
-                eprintln!("Error processing message: {}", e);
-            } 
             match process_message(&text) {
-                Err(e) => println!("Error processing message: {}", e),
+                Err(e) => eprintln!("Error processing message: {}", e),
                 Ok(price) => price_data.push(price),
             }
         } else {
@@ -91,9 +92,13 @@ async fn run_websocket(times: u64) -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
     }
-    println!("Data Points: {:?}", price_data);
+
+    // println!("Data Points: {:?}", price_data);
     match calculate_average(&price_data) {
-        Some(avg) => println!("Cache complete. The average USD price of BTC is: {:.4}", avg),
+        Some(avg) => {
+            println!("Cache complete. The average USD price of BTC is: {:.4}", avg);
+            save_to_files(&price_data, avg)?;
+        }
         None => println!("No prices available to calculate the average"),
     };
     Ok(())
@@ -101,11 +106,11 @@ async fn run_websocket(times: u64) -> Result<(), Box<dyn std::error::Error>> {
 
 fn calculate_average(prices: &Vec<f64>) -> Option<f64> {
     if prices.is_empty() {
-        return None; // Return None if the list is empty
+        return None;
     }
-    let sum: f64 = prices.iter().sum(); // Sum up all the values in the vector
-    let count = prices.len() as f64;   // Get the number of elements as f64
-    Some(sum / count) // Return the average
+    let sum: f64 = prices.iter().sum();
+    let count = prices.len() as f64;
+    Some(sum / count)
 }
 
 /// Process a WebSocket message to extract and print the price
@@ -125,4 +130,34 @@ fn process_message(text: &str) -> Result<f64, Box<dyn std::error::Error>> {
     } else {
         Err("No price found in message".into())
     }
+}
+
+/// Save the data points and average to simple and JSON files
+fn save_to_files(price_data: &Vec<f64>, average: f64) -> io::Result<()> {
+    // Save to a simple text file
+    let mut simple_file = File::create("prices.txt")?;
+    writeln!(simple_file, "Data Points: {:?}", price_data)?;
+    writeln!(simple_file, "Average Price: {:.4}", average)?;
+
+    // Save to a JSON file
+    let mut json_file = File::create("prices.json")?;
+    let json_data = serde_json::json!({
+        "data_points": price_data,
+        "average_price": average
+    });
+    write!(json_file, "{}", serde_json::to_string_pretty(&json_data)?)?;
+
+    Ok(())
+}
+
+fn read_mode() -> io::Result<()> {
+    println!("Reading prices data ...\n\n");
+    let file = File::open("prices.txt")?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines() {
+        println!("{}", line?);
+    }
+
+    Ok(())
 }
